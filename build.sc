@@ -164,7 +164,10 @@ trait InclusiveCache
 
 // We recommend using a fixed Chisel version.
 object difftest extends millbuild.difftest.build.CommonDiffTest {
-  def crossValue: String = "6.4.0"
+  def crossValue: String = "chisel"
+  override def scalaVersion = "2.13.12"
+  override def ivyDeps = Agg(ivy"org.chipsalliance::chisel:6.4.0")
+  override def scalacPluginIvyDeps = Agg(ivy"org.chipsalliance:::chisel-plugin:6.4.0")
 
   override def millSourcePath = os.pwd / "difftest"
 }
@@ -185,6 +188,8 @@ trait Ventus
   def fpuv2Module = fpuv2(crossValue)
   def rocketchipModule = rocketchip(crossValue)
   def inclusivecacheModule = inclusivecache(crossValue)
+
+  override def moduleDeps = super.moduleDeps ++ Seq(difftest)
 
   override def forkArgs = Seq("-Xmx16G", "-Xss192m")
   override def scalacOptions = super.scalacOptions() ++ Seq(
