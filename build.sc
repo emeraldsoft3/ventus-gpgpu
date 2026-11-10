@@ -186,7 +186,7 @@ trait Ventus
   def rocketchipModule = rocketchip(crossValue)
   def inclusivecacheModule = inclusivecache(crossValue)
 
-  override def forkArgs = Seq("-Xmx32G", "-Xss192m")
+  override def forkArgs = Seq("-Xmx16G", "-Xss192m")
   override def scalacOptions = super.scalacOptions() ++ Seq(
     "-language:reflectiveCalls",
     "-deprecation",
@@ -198,7 +198,7 @@ trait Ventus
 
   // Define tests module
   object tests extends ScalaTests with TestModule.ScalaTest {
-    override def forkArgs = Seq("-Xmx32G", "-Xss192m")
+    override def forkArgs = Seq("-Xmx16G", "-Xss192m")
     override def ivyDeps = super.ivyDeps() ++ Agg(
       v.chiselCrossVersions(chiselVersion)._2,
       v.chiselCrossVersions(chiselVersion)._3
