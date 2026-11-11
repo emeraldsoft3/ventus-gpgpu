@@ -12,7 +12,8 @@ package pipeline
 
 import chisel3._
 import chisel3.util._
-import top.parameters.{SPIKE_OUTPUT, wid_to_check, xLen}
+import top.parameters.{DIFFTEST, SPIKE_OUTPUT, wid_to_check, xLen}
+import difftest._
 class Branch_back extends Module{
   val io = IO(new Bundle{
     val out=DecoupledIO(new BranchCtrl)
@@ -31,7 +32,30 @@ class Branch_back extends Module{
       printf(p"0x${Hexadecimal(io.out.bits.spike_info.get.pc)} 0x${Hexadecimal(io.out.bits.spike_info.get.inst)}")
       printf(p" Jump? ${Decimal(io.out.bits.jump)}  ${Hexadecimal(io.out.bits.new_pc)}\n")
     }
-}}
+  }
+  if (DIFFTEST) {
+    val branchCommit = DifftestModule(new DiffInstrCommit, dontCare = true)
+    branchCommit.valid := io.out.fire
+    branchCommit.coreid := Cat(io.out.bits.spike_info.get.sm_id, io.out.bits.wid)
+    branchCommit.index := 0.U
+    branchCommit.pc := io.out.bits.spike_info.get.pc
+    branchCommit.instr := io.out.bits.spike_info.get.inst
+    branchCommit.skip := false.B
+    branchCommit.isRVC := false.B
+    branchCommit.rfwen := false.B
+    branchCommit.fpwen := false.B
+    branchCommit.vecwen := false.B
+    branchCommit.wdest := 0.U
+    branchCommit.wpdest := 0.U
+    branchCommit.robIdx := 0.U
+    branchCommit.lqIdx := 0.U
+    branchCommit.sqIdx := 0.U
+    branchCommit.isLoad := false.B
+    branchCommit.isStore := false.B
+    branchCommit.nFused := 0.U
+    branchCommit.special := 0.U
+  }
+}
 class InstWriteBack extends Bundle{
   val sm_id = UInt(8.W)
   val pc=UInt(xLen.W)
@@ -74,5 +98,57 @@ class Writeback(num_x:Int,num_v:Int) extends Module{
       io.out_v.bits.wb_wvd_rd.reverse.foreach(x=>printf(p"${Hexadecimal(x.asUInt)} "))
       printf(p"\n")
     }
+  }
+
+  if (DIFFTEST) {
+    val instrCommit = DifftestModule(new DiffInstrCommit, dontCare = true)
+    val intWb = DifftestModule(new DiffIntWriteback, dontCare = true)
+
+    val commit_x_valid = io.out_x.fire
+    instrCommit.valid := commit_x_valid
+    instrCommit.coreid := Cat(io.out_x.bits.spike_info.get.sm_id, io.out_x.bits.warp_id)
+    instrCommit.index := 0.U
+    instrCommit.pc := io.out_x.bits.spike_info.get.pc
+    instrCommit.instr := io.out_x.bits.spike_info.get.inst
+    instrCommit.skip := false.B
+    instrCommit.isRVC := false.B
+    instrCommit.rfwen := io.out_x.bits.wxd
+    instrCommit.fpwen := false.B
+    instrCommit.vecwen := false.B
+    instrCommit.wdest := io.out_x.bits.reg_idxw
+    instrCommit.wpdest := io.out_x.bits.reg_idxw
+    instrCommit.robIdx := 0.U
+    instrCommit.lqIdx := 0.U
+    instrCommit.sqIdx := 0.U
+    instrCommit.isLoad := false.B
+    instrCommit.isStore := false.B
+    instrCommit.nFused := 0.U
+    instrCommit.special := 0.U
+
+    intWb.valid := commit_x_valid && io.out_x.bits.wxd && io.out_x.bits.reg_idxw =/= 0.U
+    intWb.coreid := Cat(io.out_x.bits.spike_info.get.sm_id, io.out_x.bits.warp_id)
+    intWb.address := io.out_x.bits.reg_idxw
+    intWb.data := io.out_x.bits.wb_wxd_rd
+
+    val vecCommit = DifftestModule(new DiffInstrCommit, dontCare = true)
+    vecCommit.valid := io.out_v.fire
+    vecCommit.coreid := Cat(io.out_v.bits.spike_info.get.sm_id, io.out_v.bits.warp_id)
+    vecCommit.index := 0.U
+    vecCommit.pc := io.out_v.bits.spike_info.get.pc
+    vecCommit.instr := io.out_v.bits.spike_info.get.inst
+    vecCommit.skip := false.B
+    vecCommit.isRVC := false.B
+    vecCommit.rfwen := false.B
+    vecCommit.fpwen := false.B
+    vecCommit.vecwen := io.out_v.bits.wvd
+    vecCommit.wdest := io.out_v.bits.reg_idxw
+    vecCommit.wpdest := io.out_v.bits.reg_idxw
+    vecCommit.robIdx := 0.U
+    vecCommit.lqIdx := 0.U
+    vecCommit.sqIdx := 0.U
+    vecCommit.isLoad := false.B
+    vecCommit.isStore := false.B
+    vecCommit.nFused := 0.U
+    vecCommit.special := 0.U
   }
 }
