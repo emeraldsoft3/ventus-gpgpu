@@ -136,16 +136,19 @@ class warp_scheduler extends Module{
   val warp_bar_belong=RegInit(VecInit(Seq.fill(num_block)(0.U(num_warp.W))))
 
 
-  when(io.warpReq.fire){
+  when(io.warpReq.fire && warp_end && (new_wg_id === end_wg_id)){
+    warp_bar_belong(new_wg_id) := (warp_bar_belong(new_wg_id) | (1.U<<io.warpReq.bits.wid).asUInt) & (~(1.U<<warp_end_id)).asUInt
+    when(!warp_bar_lock(new_wg_id)) {
+      warp_bar_cur(new_wg_id) := 0.U
+      warp_bar_exp(new_wg_id) := (1.U << new_wg_wf_count).asUInt - 1.U
+    }
+  }.elsewhen(io.warpReq.fire){
     warp_bar_belong(new_wg_id):=warp_bar_belong(new_wg_id) | (1.U<<io.warpReq.bits.wid).asUInt  //显示warp中有哪些属于wg
-//    warp_bar_exp(new_wg_id):= warp_bar_exp(new_wg_id) | (1.U<<io.warpReq.bits.wid).asUInt
     when(!warp_bar_lock(new_wg_id)) {
       warp_bar_cur(new_wg_id) := 0.U
       warp_bar_exp(new_wg_id) := (1.U << new_wg_wf_count).asUInt - 1.U  // init to 1 for all future wfs in wg
     }
-  }
-  when(warp_end){
-//    warp_bar_exp(end_wg_id):=warp_bar_exp(end_wg_id) & (~(1.U<<io.warpRsp.bits.wid)).asUInt
+  }.elsewhen(warp_end){
     warp_bar_belong(end_wg_id):=warp_bar_belong(end_wg_id) & (~(1.U<<warp_end_id)).asUInt
   }
   warp_bar_lock:=warp_bar_belong.map(x=>x.orR)
@@ -172,11 +175,16 @@ class warp_scheduler extends Module{
     }
   }
   // collect endprg in one wg and issue flush request
-  when(io.warpReq.fire){
+  when(io.warpReq.fire && warp_end && (new_wg_id === end_wg_id)){
+    warp_endprg_cnt(new_wg_id) := (warp_endprg_cnt(new_wg_id) | (1.U<<io.warpReq.bits.wid).asUInt) & (~(1.U<<warp_end_id)).asUInt
+    warp_wg_valid(new_wg_id) := true.B
+    when(warp_end_is_last){
+      final_warp_wid(end_wg_id) := warp_end_id
+    }
+  }.elsewhen(io.warpReq.fire){
     warp_endprg_cnt(new_wg_id):=warp_endprg_cnt(new_wg_id) | (1.U<<io.warpReq.bits.wid).asUInt
     warp_wg_valid(new_wg_id):=true.B
-  }
-  when(warp_end){
+  }.elsewhen(warp_end){
     warp_endprg_cnt(end_wg_id) := warp_endprg_cnt(end_wg_id) & (~(1.U<<warp_end_id)).asUInt
     when(warp_end_is_last){
       final_warp_wid(end_wg_id) := warp_end_id
