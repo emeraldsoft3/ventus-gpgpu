@@ -143,7 +143,7 @@ class BankConflictArbiter(implicit p: Parameters) extends ShareMemModule{
     laneActiveMask(i) := perLaneConflictReq(i).activeMask
     bankIdx(i) := perLaneConflictReq(i).bankIdx
     bankIdx1H(i) := UIntToOH(bankIdx(i))
-    bankIdxMasked(i) := bankIdx1H(i) & Fill(NLanes, laneActiveMask(i))}
+    bankIdxMasked(i) := bankIdx1H(i) & Fill(NBanks, laneActiveMask(i))}
   val perBankReq_Bin = Wire(Vec(NBanks, UInt(NLanes.W)))//transpose of bankIdxMasked
   val perBankReqCount = Wire(Vec(NBanks, UInt((log2Up(NLanes)+1).W)))
   (0 until NBanks).foreach{ i =>
@@ -169,7 +169,7 @@ class BankConflictArbiter(implicit p: Parameters) extends ShareMemModule{
   val perBankActiveLaneWhenConflict1H = Wire(Vec(NBanks, UInt(NLanes.W)))
   perBankActiveLaneWhenConflict1H := perBankReq_Bin.map(Cat(_)).map(PriorityEncoderOH(_))
   val ActiveLaneWhenConflict1H = Wire(Vec(NLanes, Bool()))
-  (0 until NBanks).foreach{ i =>
+  (0 until NLanes).foreach{ i =>
     ActiveLaneWhenConflict1H(i) := Cat(perBankActiveLaneWhenConflict1H.map(_(i))).orR}
   val ReserveLaneWhenConflict1H = VecInit(((~Cat(ActiveLaneWhenConflict1H)).asUInt & Cat(laneActiveMask)).asBools.reverse)
 
