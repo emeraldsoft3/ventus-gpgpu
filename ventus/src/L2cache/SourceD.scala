@@ -139,7 +139,8 @@ val mshr_wait_reg =RegInit(false.B)
             stateReg := stage_4
             busy := true.B
             tobedone := false.B
-            when(s1_req.opcode === PutFullData && s1_req.opcode === PutPartialData) { //wait write miss no allocate
+            // wait write miss no allocate
+            when(s1_req.opcode === PutFullData || s1_req.opcode === PutPartialData) {
               mshr_wait_reg := true.B
             }
           }
@@ -276,6 +277,7 @@ val mshr_wait_reg =RegInit(false.B)
 
   io.a.bits.data  := Mux((s_final_req.opcode===PutFullData ||s_final_req.opcode=== PutPartialData),s_final_req.data,io.bs_rdat.data) // should be victim data 写miss的数据也经过这个地方转给sourceA
   io.a.bits.opcode:= PutFullData
+  io.a.bits.mask  := s_final_req.mask | Fill(params.mask_bits, !(s_final_req.opcode===PutFullData || s_final_req.opcode===PutPartialData))
 
   io.finish_issue := io.d.valid && s_final_req.last_flush
 }
