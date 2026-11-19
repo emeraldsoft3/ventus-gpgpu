@@ -232,10 +232,34 @@ if(MMU_ENABLED) {
   dirtyMaskArb.io.in(2).bits.setIdx := choosenDirtySetIdx_st0
 
 
+  iTagChecker.io.tag_of_set := tagBodyAccess.io.r.resp.data//st1
+  iTagChecker.io.tag_from_pipe := io.tagFromCore_st1
+  iTagChecker.io.way_valid := way_valid(RegEnable(io.probeRead.bits.setIdx,io.probeRead.fire))//st1
+
+  cachehit_hold.io.enq.bits.hit := iTagChecker.io.cache_hit && !probeReadBuf.ready
+  cachehit_hold.io.enq.bits.waymask := Mux(!probeReadBuf.ready, iTagChecker.io.waymask ,0.U)
+  cachehit_hold.io.enq.valid := probeReadBuf.valid && !probeReadBuf.ready
+  cachehit_hold.io.deq.ready := probeReadBuf.ready
+  io.hit_st1 := (iTagChecker.io.cache_hit || (cachehit_hold.io.deq.bits.hit && cachehit_hold.io.deq.valid)) && probeReadBuf.valid
+  io.waymaskHit_st1 := Mux(cachehit_hold.io.deq.valid && cachehit_hold.io.deq.bits.hit, cachehit_hold.io.deq.bits.waymask, iTagChecker.io.waymask)
+
+  // Capture dirtyMask probe response before allocate or flush reads can move the shared read port during pipeline stalls
+  val dirtyMaskProbeRespValid = RegNext(io.probeRead.fire, false.B)
+  val dirtyMaskProbeRespHeld = RegEnable(
+    dirtyMaskAccess.io.r.resp.data,
+    VecInit(Seq.fill(way)(0.U((dcache_BlockWords * BytesOfWord).W))),
+    dirtyMaskProbeRespValid)
+  val dirtyMaskProbeResp = Mux(
+    dirtyMaskProbeRespValid,
+    dirtyMaskAccess.io.r.resp.data,
+    dirtyMaskProbeRespHeld)
+
+  val orBaseHeldWay = OHToUInt(io.waymaskHit_st1)
+  val orBaseHeldSet = probeReadBuf.bits.setIdx
+  val hitWayCurrentlyDirty = way_dirty(orBaseHeldSet)(orBaseHeldWay).asBool
+  val dirtyMaskOrBase = Mux(hitWayCurrentlyDirty, dirtyMaskProbeResp(orBaseHeldWay), 0.U)
+
   // 从 perLaneAddr_st1 中构造要写入的dirty mask
-  // WireInit不是只执行一次的初始化，而是每个时钟周期都会将Wire重置为初始值,这是组合逻辑，不是寄存器逻辑
-  // 会产生类似这样的组合逻辑: assign dirtyMaskPerCL[0] = (条件0满足且blockOffset==0) ? 新值 : 0;
-  // dirtyMaskPerCL_init 代表本次要写入的 dirty mask 的初始值，需要与原有的值相或得到本次写入的 dirty mask
   val dirtyMaskPerCL_init = WireInit(VecInit(Seq.fill(dcache_BlockWords)(0.U(BytesOfWord.W))))
   val dirtyMaskPerCL = WireInit(VecInit(Seq.fill(dcache_BlockWords)(0.U(BytesOfWord.W))))
   for (i <- 0 until num_lane) {
@@ -243,43 +267,30 @@ if(MMU_ENABLED) {
       dirtyMaskPerCL_init(io.perLaneAddr_st1(i).blockOffset) := io.perLaneAddr_st1(i).wordOffset1H 
     }
   }
-  dirtyMaskPerCL := (dirtyMaskPerCL_init.asUInt | dirtyMaskAccess.io.r.resp.data(OHToUInt(iTagChecker.io.waymask))).asTypeOf(dirtyMaskPerCL)
+  dirtyMaskPerCL := (dirtyMaskPerCL_init.asUInt | dirtyMaskOrBase).asTypeOf(dirtyMaskPerCL)
 
   // 一旦用到 dirtyMaskAccess 读出的值，就应该在下个周期将这个位置的 dirty mask 写0，所以写也需要一个仲裁器
   val dirtyMaskWriteArb = Module(new Arbiter(new SRAMBundleAW(UInt((dcache_BlockWords * BytesOfWord).W), set, way), 3))
   dirtyMaskAccess.io.w.req <> dirtyMaskWriteArb.io.out
 
   // 分配写在st1确定是否需要替换，如果要替换，读出的dirty mask就是被用到，需要在这个阶段发起写0请求
-  // 默认 io.needReplace.get 只会拉高一个周期，且不会被阻塞
   dirtyMaskWriteArb.io.in(0).valid := io.needReplace.get
   dirtyMaskWriteArb.io.in(0).bits.apply(data = 0.U, setIdx = allocateWrite_st1.setIdx, waymask = Replacement.io.waymask_st1)
   // 在常规读写命中时，即第一级流水发起写请求，只有这个写请求是给阵列写实际值
-  dirtyMaskWriteArb.io.in(1).valid := iTagChecker.io.cache_hit && io.probeIsWrite_st1.get
-  dirtyMaskWriteArb.io.in(1).bits.apply(data = dirtyMaskPerCL.asUInt, setIdx = RegNext(io.probeRead.bits.setIdx), waymask = iTagChecker.io.waymask)
+  // Write-hit update commits only when the held ST1 request can leave the buffer
+  dirtyMaskWriteArb.io.in(1).valid := io.hit_st1 && io.probeIsWrite_st1.get && probeReadBuf.ready
+  dirtyMaskWriteArb.io.in(1).bits.apply(
+    data = dirtyMaskPerCL.asUInt,
+    setIdx = probeReadBuf.bits.setIdx,
+    waymask = io.waymaskHit_st1)
   // 只有当 flushChoosen 拉高时，读出来 dirty mask 才会被用到，需要被写0
-  // 这里的 valid 需要用 RegNext 延迟一周期是因为在dcache的顶层模块将 InvOrFluMemReqValid_st1 里也延了一个clk
-  // 不使用dcache中的 InvOrFluMemReqValid_st1 是因为与tag的发出对齐
   dirtyMaskWriteArb.io.in(2).valid := RegNext(io.flushChoosen.get.valid, false.B)
   dirtyMaskWriteArb.io.in(2).bits.apply(data = 0.U, setIdx = RegNext(choosenDirtySetIdx_st0), waymask = choosenDirtyWayMask_st1)
 
-  iTagChecker.io.tag_of_set := tagBodyAccess.io.r.resp.data//st1
-  //iTagChecker.io.ASID_of_set := ASIDAccess.io.r.resp.data
-  iTagChecker.io.tag_from_pipe := io.tagFromCore_st1
-  //iTagChecker.io.ASID_from_pipe := io.asidFromCore_st1
-  iTagChecker.io.way_valid := way_valid(RegEnable(io.probeRead.bits.setIdx,io.probeRead.fire))//st1
-  ////st1
-
-  cachehit_hold.io.enq.bits.hit := iTagChecker.io.cache_hit && !probeReadBuf.ready
-  cachehit_hold.io.enq.bits.waymask := Mux(!probeReadBuf.ready, iTagChecker.io.waymask ,0.U)
-  cachehit_hold.io.enq.valid := probeReadBuf.valid && !probeReadBuf.ready
-  cachehit_hold.io.deq.ready := probeReadBuf.ready
-  //val cachehit_hold = RegNext(iTagChecker.io.cache_hit && probeReadBuf.valid && !probeReadBuf.ready)
-  io.hit_st1 := (iTagChecker.io.cache_hit || cachehit_hold.io.deq.bits.hit && cachehit_hold.io.deq.valid) && probeReadBuf.valid//RegNext(io.probeRead.fire)
-  io.waymaskHit_st1 := Mux(cachehit_hold.io.deq.valid & cachehit_hold.io.deq.bits.hit,cachehit_hold.io.deq.bits.waymask,iTagChecker.io.waymask)
   if(!readOnly){//tag_array::write_hit_mark_dirty
-    assert(!(iTagChecker.io.cache_hit && io.probeIsWrite_st1.get && io.flushChoosen.get.valid),"way_dirty write-in conflict!")
-    when(iTagChecker.io.cache_hit && io.probeIsWrite_st1.get){////meta_entry_t::write_dirty
-      way_dirty(RegNext(io.probeRead.bits.setIdx))(OHToUInt(iTagChecker.io.waymask)) := true.B
+    assert(!(io.hit_st1 && io.probeIsWrite_st1.get && io.flushChoosen.get.valid),"way_dirty write-in conflict!")
+    when(io.hit_st1 && io.probeIsWrite_st1.get && probeReadBuf.ready){////meta_entry_t::write_dirty
+      way_dirty(probeReadBuf.bits.setIdx)(OHToUInt(io.waymaskHit_st1)) := true.B
     }.elsewhen(io.flushChoosen.get.valid){//tag_array::flush_one
       way_dirty(io.flushChoosen.get.bits((log2Up(set)+way)-1,way))(OHToUInt(io.flushChoosen.get.bits(way-1,0))) := false.B
     }.elsewhen(io.needReplace.get) {
