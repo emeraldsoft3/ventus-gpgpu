@@ -90,14 +90,17 @@ class Scheduler(params: InclusiveCacheParameters_lite) extends Module
 
   val mshrs = Seq.fill(params.mshrs) { Module(new MSHR(params)) }
 
+  // A dirty-victim miss owns its selected way until SourceD has read the
+  // victim and queued its writeback. While pending, block both the miss Get
+  // and fill commit. The write buffer has priority over MSHR A requests, so
+  // releasing the Get after enqueue preserves writeback-before-read ordering
+  // at outer memory and read-before-fill ordering in BankedStore.
+  val evictReadPending = RegInit(VecInit(Seq.fill(params.mshrs)(false.B)))
 
-
-
-
-  val mshr_request = Cat(mshrs.map {  m =>
-    ((sourceA.io.req.ready  &&m.io.schedule.a.valid) ||
-      (sourceD.io.req.ready &&m.io.schedule.d.valid) ||
-      (m.io.schedule.dir.valid&&directory.io.write.ready)) 
+  val mshr_request = Cat(mshrs.zipWithIndex.map { case (m, i) =>
+    ((sourceA.io.req.ready  &&m.io.schedule.a.valid && !evictReadPending(i)) ||
+      (sourceD.io.req.ready &&m.io.schedule.d.valid && !evictReadPending(i)) ||
+      (m.io.schedule.dir.valid&&directory.io.write.ready && !evictReadPending(i))) 
   }.reverse)
 
   val robin_filter = RegInit(0.U(params.mshrs.W))  
@@ -105,6 +108,7 @@ class Scheduler(params: InclusiveCacheParameters_lite) extends Module
   val mshr_selectOH2 = (~(leftOR(robin_request) << 1)).asUInt & robin_request
   val mshr_selectOH = mshr_selectOH2(2*params.mshrs-1, params.mshrs) | mshr_selectOH2(params.mshrs-1, 0)
   val mshr_select = OHToUInt(mshr_selectOH)
+  val selectedEvictReadPending = (mshr_selectOH & evictReadPending.asUInt).orR
 
  
   val schedule    = Mux1H (mshr_selectOH, mshrs.map(_.io.schedule))
@@ -126,13 +130,15 @@ class Scheduler(params: InclusiveCacheParameters_lite) extends Module
   mshrs.zipWithIndex.foreach { case (m, i) =>
     m.io.sinkd.valid := sinkD.io.resp.valid && (sinkD.io.resp.bits.source === i.asUInt)&&(sinkD.io.resp.bits.opcode===AccessAckData)
     m.io.sinkd.bits  := sinkD.io.resp.bits
-    m.io.schedule.a.ready  := sourceA.io.req.ready&&(mshr_select===i.asUInt) && !write_buffer.io.deq.valid
-    m.io.schedule.d.ready  := sourceD.io.req.ready&&(mshr_select===i.asUInt)&& requests.io.valid(i)
-    m.io.schedule.dir.ready:= directory.io.write.ready&&(mshr_select===i.asUInt)
+    m.io.schedule.a.ready  := sourceA.io.req.ready&&(mshr_select===i.asUInt) && !write_buffer.io.deq.valid && !evictReadPending(i)
+    m.io.schedule.d.ready  := sourceD.io.req.ready&&(mshr_select===i.asUInt)&& requests.io.valid(i) && !evictReadPending(i)
+    m.io.schedule.dir.ready:= directory.io.write.ready&&(mshr_select===i.asUInt) && !evictReadPending(i)
     m.io.valid      := requests.io.valid(i) //用于在refill的时候拉低mshr的sourced
     m.io.mshr_wait  := sourceD.io.mshr_wait
     m.io.merge.valid:= m.io.schedule.d.valid && ((requests.io.data.opcode===PutFullData) ||(requests.io.data.opcode===PutPartialData)) &&(mshr_select===i.asUInt)
     m.io.merge.bits := requests.io.data
+    assert(!(m.io.schedule.a.fire && evictReadPending(i)),
+      "dirty-victim miss Get issued before its writeback was queued")
   }
 
  
@@ -232,7 +238,7 @@ class Scheduler(params: InclusiveCacheParameters_lite) extends Module
   directory.io.invalidate := request.fire && (request.bits.opcode === Hint) && (request.bits.param === 1.U) //will issue until all resource is ready(i.e. MSHR & Put Buffer Drain)
   directory.io.flush := request.fire && (request.bits.opcode === Hint) && (request.bits.param === 0.U)
   directory.io.flush_invalidate_src:= request.bits.source
-  requests.io.pop.valid := requests.io.valid(mshr_select)&&schedule.d.valid&&sourceD.io.req.ready
+  requests.io.pop.valid := requests.io.valid(mshr_select)&&schedule.d.valid&&sourceD.io.req.ready && !selectedEvictReadPending
   requests.io.pop.bits  := mshr_select
 
 
@@ -273,7 +279,7 @@ class Scheduler(params: InclusiveCacheParameters_lite) extends Module
   sourceD.io.req.bits.param :=Mux(!schedule.d.valid ,dir_result_buffer.io.deq.bits.param,schedule.d.bits.param)
   sourceD.io.req.bits.l2cidx :=Mux(!schedule.d.valid ,dir_result_buffer.io.deq.bits.l2cidx,schedule.d.bits.l2cidx)
   sourceD.io.req.bits.spike_info.foreach( _ := DontCare )
-  bankedStore.io.sinkD_adr.valid := schedule.dir.valid     //now managed by MSHR
+  bankedStore.io.sinkD_adr.valid := schedule.dir.valid && !selectedEvictReadPending     //now managed by MSHR
   bankedStore.io.sinkD_adr.bits.set := schedule.dir.bits.set
   bankedStore.io.sinkD_adr.bits.way := schedule.dir.bits.way
   bankedStore.io.sinkD_adr.bits.mask:= ~(0.U(params.mask_bits.W))
@@ -283,6 +289,19 @@ class Scheduler(params: InclusiveCacheParameters_lite) extends Module
   bankedStore.io.sourceD_wadr <> sourceD.io.bs_wadr
   bankedStore.io.sourceD_wdat := sourceD.io.bs_wdat   
   sourceD.io.bs_rdat := bankedStore.io.sourceD_rdat   
+
+  // Hold a dirty-victim MSHR until SourceD has queued the victim writeback.
+  mshrs.zipWithIndex.foreach { case (m, i) =>
+    val dirtyVictimAlloc = directory.io.result.fire && alloc && mshr_insertOH.asBools(i) &&
+      !directory.io.result.bits.hit && directory.io.result.bits.dirty && !directory.io.result.bits.flush
+    when(dirtyVictimAlloc) {
+      evictReadPending(i) := true.B
+    }.elsewhen(sourceD.io.evict_read_done.valid &&
+               (m.io.status.set === sourceD.io.evict_read_done.bits.set) &&
+               (m.io.status.way === sourceD.io.evict_read_done.bits.way)) {
+      evictReadPending(i) := false.B
+    }
+  }   
 
 
 }

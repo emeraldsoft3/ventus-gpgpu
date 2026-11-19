@@ -55,6 +55,7 @@ class SourceD(params: InclusiveCacheParameters_lite) extends Module
     val bs_wdat = Output(new BankedStoreInnerPoison(params))
     val a       = Decoupled(new FullRequest(params))
     val mshr_wait = Output(Bool())
+    val evict_read_done = Valid(new ResvClear_lite(params))
 
     val finish_issue = Output(Bool())
   })
@@ -139,7 +140,8 @@ val mshr_wait_reg =RegInit(false.B)
             stateReg := stage_4
             busy := true.B
             tobedone := false.B
-            when(s1_req.opcode === PutFullData && s1_req.opcode === PutPartialData) { //wait write miss no allocate
+            // wait write miss no allocate
+            when(s1_req.opcode === PutFullData || s1_req.opcode === PutPartialData) {
               mshr_wait_reg := true.B
             }
           }
@@ -276,6 +278,12 @@ val mshr_wait_reg =RegInit(false.B)
 
   io.a.bits.data  := Mux((s_final_req.opcode===PutFullData ||s_final_req.opcode=== PutPartialData),s_final_req.data,io.bs_rdat.data) // should be victim data 写miss的数据也经过这个地方转给sourceA
   io.a.bits.opcode:= PutFullData
+  io.a.bits.mask  := s_final_req.mask | Fill(params.mask_bits, !(s_final_req.opcode===PutFullData || s_final_req.opcode===PutPartialData))
+
+  val dirtyVictimWbFire = io.a.fire && s_final_req.dirty && !s_final_req.hit && (s_final_req.opcode === Get)
+  io.evict_read_done.valid    := dirtyVictimWbFire
+  io.evict_read_done.bits.set := s_final_req.set
+  io.evict_read_done.bits.way := s_final_req.way
 
   io.finish_issue := io.d.valid && s_final_req.last_flush
 }

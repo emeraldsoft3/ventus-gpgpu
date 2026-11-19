@@ -58,6 +58,11 @@ class DirectoryWrite_lite(params: InclusiveCacheParameters_lite) extends Bundle 
   //override def cloneType: DirectoryWrite_lite.this.type = new DirectoryWrite_lite(params).asInstanceOf[this.type]
 }
 
+class ResvClear_lite(params: InclusiveCacheParameters_lite) extends Bundle {
+  val set = UInt(params.setBits.W)
+  val way = UInt(params.wayBits.W)
+}
+
 class DirectoryRead_lite(params: InclusiveCacheParameters_lite) extends FullRequest(params)
 {
   //override def cloneType: DirectoryRead_lite.this.type = new DirectoryRead_lite(params).asInstanceOf[this.type]
