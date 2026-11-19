@@ -222,7 +222,13 @@ class Scheduler(params: InclusiveCacheParameters_lite) extends Module
   requests.io.push.bits.data.source:= directory.io.result.bits.source
   requests.io.push.bits.index := OHToUInt(Mux(alloc,mshr_insertOH,tagMatches))
 
-  directory.io.read.valid := request.valid && !(request.bits.opcode === Hint) && mshr_free && requests.io.push.ready && directory.io.ready && !(issue_flush_invalidate)
+  val resultReservesMshr = directory.io.result.valid &&
+    !directory.io.result.bits.hit && !directory.io.result.bits.flush && alloc
+  val resultMshrOH = Mux(resultReservesMshr, mshr_insertOH, 0.U(params.mshrs.W))
+  val mshrFreeAfterResult = ((~mshr_validOH).asUInt & (~resultMshrOH).asUInt).orR
+  val requestCanIssue = mshrFreeAfterResult && requests.io.push.ready && directory.io.ready && !(issue_flush_invalidate)
+
+  directory.io.read.valid := request.valid && !(request.bits.opcode === Hint) && requestCanIssue
   directory.io.read.bits := request.bits
   directory.io.write.valid := schedule.dir.valid //&& !schedule.dir.bits.is_writemiss //事实上对于writemiss没有写dir
   directory.io.tag_match :=tagMatches.orR
@@ -236,20 +242,28 @@ class Scheduler(params: InclusiveCacheParameters_lite) extends Module
   requests.io.pop.bits  := mshr_select
 
 
-  request.ready :=mshr_free && requests.io.push.ready && directory.io.read.ready && directory.io.ready && !(issue_flush_invalidate)
+  request.ready := requestCanIssue && directory.io.read.ready
 
 
 
 
   val dir_result_buffer=Module(new Queue(new DirectoryResult_lite_victim(params),1))
 
-  dir_result_buffer.io.enq.valid:= directory.io.result.valid && (directory.io.result.bits.hit || directory.io.result.bits.dirty || directory.io.result.bits.last_flush) //hit or miss dirty, sourceD don't care if dirty when hit
+  val needPush = !directory.io.result.bits.hit && !directory.io.result.bits.flush
+  val needEnq  = directory.io.result.bits.hit ||
+                 directory.io.result.bits.dirty ||
+                 directory.io.result.bits.last_flush
+  val primaryMissCanTrack = !needPush || !alloc || mshr_free
+
+  dir_result_buffer.io.enq.valid:= directory.io.result.valid && needEnq //hit or miss dirty, sourceD don't care if dirty when hit
   dir_result_buffer.io.enq.bits:=directory.io.result.bits
 
   dir_result_buffer.io.deq.ready:= !schedule.d.valid && sourceD.io.req.ready
 
 
-  directory.io.result.ready:= Mux(directory.io.result.bits.hit,dir_result_buffer.io.enq.ready,requests.io.push.ready)
+  directory.io.result.ready := (!needPush || requests.io.push.ready) &&
+                               (!needEnq  || dir_result_buffer.io.enq.ready) &&
+                               primaryMissCanTrack
 
 
   val full_mask = FillInterleaved(params.micro.writeBytes * 8, requests.io.data.mask)
