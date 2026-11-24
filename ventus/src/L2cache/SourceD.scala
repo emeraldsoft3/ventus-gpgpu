@@ -55,6 +55,7 @@ class SourceD(params: InclusiveCacheParameters_lite) extends Module
     val bs_wdat = Output(new BankedStoreInnerPoison(params))
     val a       = Decoupled(new FullRequest(params))
     val mshr_wait = Output(Bool())
+    val maintenance_writes_drained = Input(Bool())
 
     val finish_issue = Output(Bool())
   })
@@ -261,7 +262,9 @@ val mshr_wait_reg =RegInit(false.B)
   io.bs_wadr.bits.mask:=   pb_beat.mask
 
   ///将读取数据输出d
-  io.d.valid        :=((stateReg===stage_4 || stateReg===stage_8)&& !(s_final_req.opcode===Hint && !s_final_req.last_flush)) //&& s1_req.opcode===Get)//数据读出来之后准备输出
+  val finalMaintenanceRsp = s_final_req.opcode === Hint && s_final_req.last_flush
+  io.d.valid        :=((stateReg===stage_4 || stateReg===stage_8)&& !(s_final_req.opcode===Hint && !s_final_req.last_flush) &&
+    (!finalMaintenanceRsp || io.maintenance_writes_drained)) //&& s1_req.opcode===Get)//数据读出来之后准备输出
   io.d.bits.source  :=s_final_req.source
   io.d.bits.opcode  :=Mux(s_final_req.opcode===Get,AccessAckData,Mux(s_final_req.last_flush,HintAck,AccessAck))
   io.d.bits.size    := s_final_req.size
@@ -277,5 +280,5 @@ val mshr_wait_reg =RegInit(false.B)
   io.a.bits.data  := Mux((s_final_req.opcode===PutFullData ||s_final_req.opcode=== PutPartialData),s_final_req.data,io.bs_rdat.data) // should be victim data 写miss的数据也经过这个地方转给sourceA
   io.a.bits.opcode:= PutFullData
 
-  io.finish_issue := io.d.valid && s_final_req.last_flush
+  io.finish_issue := io.d.fire && s_final_req.last_flush
 }
