@@ -431,6 +431,7 @@ class SM_wrapper(FakeCache: Boolean = false, sm_id: Int = 0, SV: Option[mmu.SVPa
   pipe.io.dcache_rsp.bits.activeMask:=dcache.io.coreRsp.bits.activeMask
   //pipe.io.dcache_rsp.bits.isWrite:=dcache.io.coreRsp.bits.isWrite
   dcache.io.coreRsp.ready:=pipe.io.dcache_rsp.ready
+  pipe.io.dcache_flush_done := dcache.io.coreRsp.valid
 
   assert(num_cache_in_sm == 2, "Now only support 2 L1 Caches(one L1I and one L1D) in a single SM")
 if(MMU_ENABLED) {

@@ -81,6 +81,7 @@ class SM_wrapper_nocache(val sm_id: Int = 0) extends Module {
   icache.io.memRsp :<>= io.icache.rsp
   io.dcache_req :<>= pipe.io.dcache_req
   pipe.io.dcache_rsp :<>= io.dcache_rsp
+  pipe.io.dcache_flush_done := io.dcache_req.fire
 }
 
 class GPGPU_top_nocache() extends Module {
